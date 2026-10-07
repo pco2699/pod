@@ -1,0 +1,28 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
+  <meta name="theme-color" content="#1e1f23">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="mobile-web-app-capable" content="yes">
+  <title>pod</title>
+  <link data-trunk rel="rust" data-wasm-opt="z" />
+  <link data-trunk rel="copy-file" href="assets/manifest.webmanifest" />
+  <link data-trunk rel="copy-file" href="assets/icon-192.png" />
+  <link data-trunk rel="copy-file" href="assets/icon-512.png" />
+  <link rel="manifest" href="/manifest.webmanifest">
+  <link rel="apple-touch-icon" href="/icon-192.png">
+  <style>
+    html, body { margin: 0; padding: 0; height: 100%; overflow: hidden; background: #1e1f23; }
+    @media (prefers-color-scheme: light) { html, body { background: #f6f6f8; } }
+    canvas#pod { position: fixed; inset: 0; width: 100%; height: 100%; touch-action: none; outline: none; }
+    #boot { position: fixed; inset: 0; display: grid; place-items: center; font: 14px system-ui, sans-serif; color: #889; }
+  </style>
+</head>
+<body>
+  <div id="boot">loading…</div>
+  <canvas id="pod"></canvas>
+  <script>addEventListener('TrunkApplicationStarted', () => document.getElementById('boot')?.remove());</script>
+</body>
+</html>

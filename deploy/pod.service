@@ -1,0 +1,16 @@
+# systemd *user* unit (same pattern as kusa's habit-tracker.service).
+# Install to ~/.config/systemd/user/pod.service, then:
+#   systemctl --user daemon-reload
+#   systemctl --user enable --now pod
+[Unit]
+Description=pod podcast editor (port 8094)
+After=network.target
+
+[Service]
+WorkingDirectory=%h/apps/pod
+ExecStart=%h/apps/pod/pod-server %h/apps/pod/config.json
+Restart=always
+RestartSec=3
+
+[Install]
+WantedBy=default.target

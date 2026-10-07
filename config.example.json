@@ -1,0 +1,5 @@
+{
+  "port": 8094,
+  "token": "generate with: openssl rand -hex 24",
+  "data_dir": "data"
+}

@@ -1,0 +1,9 @@
+[workspace]
+resolver = "3"
+members = ["core", "client", "server"]
+default-members = ["core", "server"]
+
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1
