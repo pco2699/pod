@@ -1,29 +1,40 @@
-//! fetch() wrappers for the /api routes. Every call carries the stored key as a
-//! Bearer token.
+//! fetch() wrappers for the /api routes. Every call carries the stored key, if
+//! there is one, as a Bearer token. Behind a signing-in proxy there may be none.
 
 use serde::{Serialize, de::DeserializeOwned};
 use wasm_bindgen::{JsCast, JsValue};
 use wasm_bindgen_futures::JsFuture;
-use web_sys::{Blob, Headers, Request, RequestInit, Response};
+use web_sys::{Blob, Headers, Request, RequestInit, RequestRedirect, Response, ResponseType};
 
 const KEY: &str = "pod_key";
 
+/// Not an HTTP status: the request was answered with a redirect, which for the
+/// API only ever means a signing-in proxy wants the user to log in again.
+pub const SIGNED_OUT: u16 = 1;
+
 #[derive(Debug, Clone)]
 pub struct HttpError {
-    /// 0 when the request never got a response (offline, DNS, ...).
+    /// 0 when the request never got a response (offline, DNS, ...); SIGNED_OUT
+    /// when a login proxy turned it away.
     pub status: u16,
     pub body: String,
+    /// Whether the request carried a key, so a 401 can tell a wrong key from a
+    /// missing one.
+    pub keyed: bool,
 }
 
 impl HttpError {
     fn network(e: JsValue) -> Self {
-        Self { status: 0, body: format!("{e:?}") }
+        Self { status: 0, body: format!("{e:?}"), keyed: false }
     }
 
     /// The server's `{"error": ...}` message, or something readable.
     pub fn message(&self) -> String {
         if self.status == 0 {
             return "offline".into();
+        }
+        if self.status == SIGNED_OUT {
+            return "signed out — reload the page to sign in again".into();
         }
         serde_json::from_str::<serde_json::Value>(&self.body)
             .ok()
@@ -87,10 +98,11 @@ pub enum Body<'a> {
 pub async fn fetch(method: &str, path: &str, body: Body<'_>, range: Option<(u64, u64)>) -> Result<Response> {
     let init = RequestInit::new();
     init.set_method(method);
+    // A login proxy answers a lapsed session with a redirect to its sign-in page,
+    // which fetch cannot follow cross-origin. Ask for it unfollowed and say so.
+    init.set_redirect(RequestRedirect::Manual);
     let headers = Headers::new().map_err(HttpError::network)?;
-    if let Some(k) = key() {
-        headers.set("Authorization", &format!("Bearer {k}")).ok();
-    }
+    let keyed = key().is_some_and(|k| headers.set("Authorization", &format!("Bearer {k}")).is_ok());
     if let Some((a, b)) = range {
         headers.set("Range", &format!("bytes={a}-{}", b - 1)).ok();
     }
@@ -109,13 +121,16 @@ pub async fn fetch(method: &str, path: &str, body: Body<'_>, range: Option<(u64,
         .await
         .map_err(HttpError::network)?
         .unchecked_into();
+    if resp.type_() == ResponseType::Opaqueredirect {
+        return Err(HttpError { status: SIGNED_OUT, body: String::new(), keyed });
+    }
     if !resp.ok() {
         let status = resp.status();
         let body = match resp.text() {
             Ok(p) => JsFuture::from(p).await.ok().and_then(|v| v.as_string()).unwrap_or_default(),
             Err(_) => String::new(),
         };
-        return Err(HttpError { status, body });
+        return Err(HttpError { status, body, keyed });
     }
     Ok(resp)
 }
@@ -136,7 +151,8 @@ async fn text(resp: Response) -> Result<String> {
 }
 
 fn parse<T: DeserializeOwned>(s: &str) -> Result<T> {
-    serde_json::from_str(s).map_err(|e| HttpError { status: 500, body: format!("{{\"error\":\"bad response: {e}\"}}") })
+    serde_json::from_str(s)
+        .map_err(|e| HttpError { status: 500, body: format!("{{\"error\":\"bad response: {e}\"}}"), keyed: false })
 }
 
 pub async fn get<T: DeserializeOwned>(path: &str) -> Result<T> {
@@ -161,9 +177,15 @@ pub async fn get_range(path: &str, start: u64, end: u64) -> Result<Vec<u8>> {
     Ok(b)
 }
 
-/// Link that works without headers (for a plain download in a new tab).
+/// Link that works without headers (for a plain download in a new tab). With no
+/// key the login proxy's cookie carries it; an empty `?key=` would only get it
+/// waved past the login and then refused.
 pub fn keyed_url(path: &str) -> String {
-    let k = key().unwrap_or_default();
-    let enc: String = js_sys::encode_uri_component(&k).into();
-    format!("/api{path}?key={enc}")
+    match key() {
+        Some(k) => {
+            let enc: String = js_sys::encode_uri_component(&k).into();
+            format!("/api{path}?key={enc}")
+        }
+        None => format!("/api{path}"),
+    }
 }

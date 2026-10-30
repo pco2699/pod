@@ -77,4 +77,18 @@ sudo nginx -t && sudo systemctl reload nginx && sudo certbot --nginx -d pod.pco2
 Open `https://pod.pco2699.xyz/?key=<token>` once on each device. The key is then
 remembered and removed from the address bar.
 
+### Behind a login proxy
+
+If nginx already signs you in (oauth2-proxy via `auth_request`), the key is a second
+password for the same person. Add `"proxy_auth_header": "X-Auth-Request-Email"` to
+`config.json` and have nginx always set that header from the proxy's answer
+(`proxy_set_header X-Auth-Request-Email $email;`, which also replaces any copy a client
+sent). A request carrying it needs no key, so the app opens without asking for one. A
+key that is still stored is tried first and dropped if refused. If the login lapses
+while editing, the app says so and keeps unsynced edits until you sign in again.
+
+Only set it when nginx always overwrites the header and nothing else can reach the
+port: anyone who can send the header directly skips the check. The token keeps working
+for scripts.
+
 Data lives in `~/apps/pod/data` (`blobs/`, `projects/`, `exports/`). Back up that folder.

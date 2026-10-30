@@ -2,7 +2,8 @@
 //! decoding and rendering happens in the browser; this only persists and serves.
 //!
 //! Auth (same scheme as kusa): `Authorization: Bearer <token>` or `?key=<token>`
-//! on every /api route. The app shell itself is public and holds no data.
+//! on every /api route, or the `proxy_auth_header` a signing-in reverse proxy sets.
+//! The app shell itself is public and holds no data.
 //!
 //! On disk, under `data_dir`:
 //!   blobs/<sha256>             immutable, content addressed
@@ -54,6 +55,11 @@ struct Config {
     token: String,
     #[serde(default = "default_data_dir")]
     data_dir: PathBuf,
+    /// Header a signing-in reverse proxy (oauth2-proxy behind nginx auth_request,
+    /// say) sets for a logged-in user; a request carrying it needs no key. Only
+    /// safe when the proxy always overwrites it and nothing else reaches the port.
+    #[serde(default)]
+    proxy_auth_header: Option<String>,
 }
 
 fn default_data_dir() -> PathBuf {
@@ -75,6 +81,7 @@ struct Entry {
 
 struct App {
     token: String,
+    proxy_auth_header: Option<header::HeaderName>,
     dir: PathBuf,
     projects: Mutex<HashMap<String, Entry>>,
     /// Serializes chunk appends so offsets stay consistent.
@@ -140,8 +147,12 @@ async fn main() {
     }
     let projects = load_projects(&cfg.data_dir.join("projects")).await;
     tracing::info!("loaded {} projects", projects.len());
+    let proxy_auth_header = cfg.proxy_auth_header.map(|h| {
+        header::HeaderName::try_from(h.as_str()).unwrap_or_else(|e| panic!("proxy_auth_header {h:?}: {e}"))
+    });
     let app = Arc::new(App {
         token: cfg.token,
+        proxy_auth_header,
         dir: cfg.data_dir,
         projects: Mutex::new(projects),
         uploads: Mutex::new(()),
@@ -200,6 +211,13 @@ async fn load_projects(dir: &Path) -> HashMap<String, Entry> {
 }
 
 async fn auth(State(app): State<Shared>, req: Request, next: Next) -> Response {
+    let vouched = app
+        .proxy_auth_header
+        .as_ref()
+        .is_some_and(|h| req.headers().get(h).is_some_and(|v| !v.is_empty()));
+    if vouched {
+        return next.run(req).await;
+    }
     let bearer = req
         .headers()
         .get(header::AUTHORIZATION)
