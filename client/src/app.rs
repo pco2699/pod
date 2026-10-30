@@ -30,7 +30,8 @@ thread_local! {
 
 enum Msg {
     Toast(String),
-    Unauthorized,
+    /// A 401; `keyed` says whether the request carried a key.
+    Unauthorized { keyed: bool },
     Projects(Vec<ProjectInfo>),
     Opened(Box<Opened>),
     OpenFailed(String),
@@ -83,7 +84,7 @@ impl Tx {
 }
 
 fn http_msg(e: HttpError) -> Msg {
-    if e.status == 401 { Msg::Unauthorized } else { Msg::Toast(e.message()) }
+    if e.status == 401 { Msg::Unauthorized { keyed: e.keyed } } else { Msg::Toast(e.message()) }
 }
 
 // ---------- server shapes ----------
@@ -132,7 +133,11 @@ struct ViewState {
 pub struct PodApp {
     inbox: Rc<RefCell<Vec<Msg>>>,
     tx: Tx,
-    has_key: bool,
+    /// The server turned us away without a key: show the key screen. Starts false,
+    /// since behind a signing-in proxy no key is needed at all.
+    need_key: bool,
+    /// A stored key was just refused; say so if the key screen follows.
+    key_rejected: bool,
     key_input: String,
     projects: Option<Vec<ProjectInfo>>,
     new_name: String,
@@ -149,7 +154,8 @@ impl PodApp {
         let mut app = Self {
             inbox,
             tx,
-            has_key: net::init_key().is_some(),
+            need_key: false,
+            key_rejected: false,
             key_input: String::new(),
             projects: None,
             new_name: String::new(),
@@ -158,14 +164,18 @@ impl PodApp {
             opening: false,
             next_session: 1,
         };
-        if app.has_key {
-            app.load_projects();
-            if let Some(id) = net::get_local(LAST_PROJECT) {
-                app.open(id);
-            }
-        }
+        net::init_key();
+        app.load_last();
         store::request_persistence();
         app
+    }
+
+    /// The project list, and the project that was open last time.
+    fn load_last(&mut self) {
+        self.load_projects();
+        if let Some(id) = net::get_local(LAST_PROJECT) {
+            self.open(id);
+        }
     }
 
     fn load_projects(&self) {
@@ -182,7 +192,7 @@ impl PodApp {
         self.tx.spawn(async move {
             Some(match net::get::<Opened>(&format!("/projects/{id}")).await {
                 Ok(o) => Msg::Opened(Box::new(o)),
-                Err(e) if e.status == 401 => Msg::Unauthorized,
+                Err(e) if e.status == 401 => Msg::Unauthorized { keyed: e.keyed },
                 Err(e) => Msg::OpenFailed(e.message()),
             })
         });
@@ -195,11 +205,23 @@ impl PodApp {
     fn handle(&mut self, ctx: &egui::Context, m: Msg) {
         match m {
             Msg::Toast(s) => self.toast(ctx, s),
-            Msg::Unauthorized => {
-                net::set_key(None);
-                self.has_key = false;
+            Msg::Unauthorized { keyed: true } => {
+                // The stored key is refused. Behind a signing-in proxy none may be needed,
+                // so go again without it before asking for another. Several requests can
+                // fail on the same key; only the first one retries.
+                if net::key().is_some() {
+                    net::set_key(None);
+                    self.key_rejected = true;
+                    self.editor = None;
+                    self.load_last();
+                }
+            }
+            Msg::Unauthorized { keyed: false } => {
+                self.need_key = true;
                 self.editor = None;
-                self.toast(ctx, "That key was not accepted.");
+                if std::mem::take(&mut self.key_rejected) {
+                    self.toast(ctx, "That key was not accepted.");
+                }
             }
             Msg::Projects(p) => self.projects = Some(p),
             Msg::Opened(o) => {
@@ -233,7 +255,7 @@ impl eframe::App for PodApp {
             self.handle(&ctx, m);
         }
 
-        if !self.has_key {
+        if self.need_key {
             self.key_screen(ui);
         } else if let Some(ed) = &mut self.editor {
             let mut close = false;
@@ -284,7 +306,7 @@ impl PodApp {
                 if (ui.button("Continue").clicked() || enter) && !self.key_input.trim().is_empty() {
                     net::set_key(Some(self.key_input.trim()));
                     self.key_input.clear();
-                    self.has_key = true;
+                    self.need_key = false;
                     self.load_projects();
                 }
             });
@@ -298,9 +320,11 @@ impl PodApp {
             ui.horizontal(|ui| {
                 ui.heading("Episodes");
                 ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                    if ui.small_button("Forget key").clicked() {
+                    // Without the key the list is asked for again: a signing-in proxy may
+                    // still let it through, and a server that wants a key shows the key screen.
+                    if net::key().is_some() && ui.small_button("Forget key").clicked() {
                         net::set_key(None);
-                        self.has_key = false;
+                        self.load_projects();
                     }
                     if ui.small_button("⟳").on_hover_text("Refresh").clicked() {
                         self.load_projects();
@@ -675,7 +699,12 @@ impl Editor {
                         Ok(r) => tx.ed(s, EdMsg::Conflict(r.version, r.ops)),
                         Err(_) => tx.ed(s, EdMsg::SyncFailed),
                     },
-                    Err(e) if e.status == 401 => tx.send(Msg::Unauthorized),
+                    Err(e) if e.status == 401 => tx.send(Msg::Unauthorized { keyed: e.keyed }),
+                    // Keep the edits; they go out once the user has signed in again.
+                    Err(e) if e.status == net::SIGNED_OUT => {
+                        tx.send(Msg::Toast(e.message()));
+                        tx.ed(s, EdMsg::SyncFailed)
+                    }
                     Err(e) if e.status == 400 => tx.ed(s, EdMsg::Rejected(e.message())),
                     Err(_) => tx.ed(s, EdMsg::SyncFailed),
                 }
